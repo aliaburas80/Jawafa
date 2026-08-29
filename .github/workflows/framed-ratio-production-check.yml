@@ -13,20 +13,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Verify exact framed photograph geometry
+      - name: Verify measured framed image derivative
         shell: bash
         run: |
           set -euo pipefail
           CHROME="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
           test -n "$CHROME"
-          mkdir -p /tmp/framed-ratio-check && cd /tmp/framed-ratio-check
+          mkdir -p /tmp/framed-image-check && cd /tmp/framed-image-check
           npm init -y >/dev/null 2>&1
           npm install --silent --no-audit --no-fund puppeteer-core@24.16.0
           export CHROME
           node <<'NODE'
           const puppeteer = require('puppeteer-core');
           const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-          const url = 'https://aliaburas.com/photo/aar_f677e41a0cd0_bc324753';
+          const photoId = 'aar_b2d446150746_6d5622c5';
+          const url = `https://aliaburas.com/photo/${photoId}`;
 
           (async () => {
             const browser = await puppeteer.launch({
@@ -37,87 +38,74 @@ jobs:
             try {
               const page = await browser.newPage();
               await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36');
-              await page.setViewport({ width: 1440, height: 1000 });
+              await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 2 });
 
-              async function navigate(target) {
+              async function navigate() {
                 try {
-                  await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                  await page.goto(`${url}?frame-image-check=${Date.now()}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
                 } catch (error) {
                   console.log(`Navigation continued after timeout: ${error.name}`);
                 }
                 await sleep(1500);
-              }
-
-              async function openAndPassChallenge() {
-                await navigate(`${url}?ratio-check=${Date.now()}`);
                 for (let i = 0; i < 6; i += 1) {
                   const html = await page.content();
                   if (!/Checking your browser/i.test(html)) return;
                   console.log(`Hostinger verification ${i + 1}/6`);
                   await sleep(9000);
-                  try {
-                    await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
-                  } catch (error) {
-                    console.log(`Reload continued after timeout: ${error.name}`);
-                  }
+                  try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
                   await sleep(1200);
                 }
-                const html = await page.content();
-                if (/Checking your browser/i.test(html)) throw new Error('HOSTINGER_CHALLENGE_PERSISTED');
               }
 
               let deployed = false;
-              for (let attempt = 1; attempt <= 20; attempt += 1) {
-                await openAndPassChallenge();
-                deployed = await page.$('[data-frame-ratio-mode="photo"]') !== null;
+              for (let attempt = 1; attempt <= 24; attempt += 1) {
+                await navigate();
+                deployed = await page.$('[data-frame-image-mode="measured-derivative"]') !== null;
                 if (deployed) break;
-                console.log(`Waiting for Hostinger deploy ${attempt}/20`);
-                await sleep(15000);
+                console.log(`Waiting for Hostinger deploy ${attempt}/24`);
+                await sleep(12000);
               }
-              if (!deployed) throw new Error('PHOTO_RATIO_FIX_NOT_DEPLOYED');
+              if (!deployed) throw new Error('MEASURED_FRAME_IMAGE_FIX_NOT_DEPLOYED');
 
-              await page.evaluate(async () => {
-                const frame = document.querySelector('[data-frame-ratio-mode="photo"]');
-                if (frame) frame.scrollIntoView({ block: 'center' });
-                await new Promise(resolve => setTimeout(resolve, 700));
-                const image = frame?.querySelector('img');
-                if (image && !image.complete) await new Promise(resolve => {
-                  const done = () => resolve();
-                  image.addEventListener('load', done, { once: true });
-                  image.addEventListener('error', done, { once: true });
-                  setTimeout(done, 8000);
-                });
-              });
+              await page.evaluate(() => document.querySelector('[data-frame-image-mode="measured-derivative"]')?.scrollIntoView({ block: 'center' }));
+              await sleep(2500);
+              await page.waitForFunction(() => {
+                const image = document.querySelector('[data-frame-image-mode="measured-derivative"] img');
+                return Boolean(image && image.complete);
+              }, { timeout: 12000 }).catch(() => {});
 
               const result = await page.evaluate(() => {
-                const frame = document.querySelector('[data-frame-ratio-mode="photo"]');
-                if (!frame) return null;
-                const artwork = frame.querySelector('img');
-                const rect = frame.getBoundingClientRect();
-                const expected = Number(frame.getAttribute('data-photo-aspect-ratio'));
-                const rendered = rect.width / rect.height;
-                const artworkStyle = artwork ? getComputedStyle(artwork) : null;
+                const frame = document.querySelector('[data-frame-image-mode="measured-derivative"]');
+                const artwork = frame?.querySelector('img');
+                const rect = frame?.getBoundingClientRect();
                 return {
-                  expected,
-                  rendered,
-                  relativeError: Math.abs(rendered - expected) / expected,
-                  artworkSrc: artwork?.getAttribute('src') || '',
-                  naturalRatio: artwork && artwork.naturalHeight ? artwork.naturalWidth / artwork.naturalHeight : 0,
-                  background: artworkStyle?.backgroundColor || '',
-                  frameWidth: rect.width,
-                  frameHeight: rect.height,
+                  frameFound: Boolean(frame),
+                  artworkFound: Boolean(artwork),
+                  src: artwork?.getAttribute('src') || '',
+                  currentSrc: artwork?.currentSrc || '',
+                  complete: Boolean(artwork?.complete),
+                  naturalWidth: artwork?.naturalWidth || 0,
+                  naturalHeight: artwork?.naturalHeight || 0,
+                  frameWidth: rect?.width || 0,
+                  frameHeight: rect?.height || 0,
+                  unavailable: Boolean(frame?.querySelector('[role="status"]')),
                 };
               });
 
-              if (!result) throw new Error('FRAME_NOT_FOUND');
               console.log(JSON.stringify(result));
-              if (!Number.isFinite(result.expected) || result.expected <= 0) throw new Error('INVALID_EXPECTED_PHOTO_RATIO');
-              if (result.relativeError > 0.04) throw new Error(`FRAME_RATIO_MISMATCH:${result.rendered}:${result.expected}`);
-              if (!result.artworkSrc.includes('aar_f677e41a0cd0_bc324753')) throw new Error(`WRONG_ARTWORK:${result.artworkSrc}`);
-              if (!result.artworkSrc.includes('/images/')) throw new Error(`ARTWORK_NOT_OPTIMIZED:${result.artworkSrc}`);
-              if (result.naturalRatio && Math.abs(result.naturalRatio - result.expected) / result.expected > 0.03) throw new Error(`IMAGE_RATIO_METADATA_MISMATCH:${result.naturalRatio}:${result.expected}`);
-              if (!/rgba\(0, 0, 0, 0\)|transparent/.test(result.background)) throw new Error(`ARTWORK_BACKGROUND_NOT_TRANSPARENT:${result.background}`);
-              console.log('FRAMED_RATIO_PRODUCTION_OK');
+              if (!result.frameFound) throw new Error('FRAME_NOT_FOUND');
+              if (!result.artworkFound) throw new Error('ARTWORK_NOT_FOUND');
+              if (!result.complete || result.naturalWidth <= 0 || result.naturalHeight <= 0) throw new Error(`ARTWORK_DID_NOT_LOAD:${result.src}`);
+              if (result.unavailable) throw new Error('ARTWORK_FELL_BACK_TO_UNAVAILABLE_STATE');
+              if (!result.src.includes(`/street/${photoId}/v1/original.jpg`)) throw new Error(`WRONG_ARTWORK:${result.src}`);
+              if (!/\/images\/w\d+-h\d+-q\d+-fitinside\//.test(result.src)) throw new Error(`NOT_A_FITINSIDE_DERIVATIVE:${result.src}`);
+              if (/w1200-h1200/.test(result.src)) throw new Error(`GENERIC_1200_DERIVATIVE_STILL_USED:${result.src}`);
+              const match = result.src.match(/\/images\/w(\d+)-h(\d+)-q\d+-fitinside\//);
+              if (!match) throw new Error(`DERIVATIVE_DIMENSIONS_MISSING:${result.src}`);
+              const width = Number(match[1]);
+              const height = Number(match[2]);
+              if (width > 1024 || height > 1024) throw new Error(`DERIVATIVE_TOO_LARGE:${width}x${height}`);
+              console.log(`FRAMED_IMAGE_DERIVATIVE_OK ${width}x${height} -> ${result.naturalWidth}x${result.naturalHeight}`);
             } finally {
               await browser.close();
             }
