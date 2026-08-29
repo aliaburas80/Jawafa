@@ -1,0 +1,49 @@
+name: P0 Acceptance Deploy Check
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Verify final P0 Admin acceptance route is live
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHROME="$(command -v google-chrome || command -v chromium || true)"
+          mkdir -p /tmp/p0-check && cd /tmp/p0-check
+          npm init -y >/dev/null 2>&1
+          npm install --silent --no-audit --no-fund puppeteer-core@24.16.0
+          export CHROME
+          node <<'NODE'
+          const puppeteer = require('puppeteer-core');
+          (async () => {
+            const browser = await puppeteer.launch({ headless:true, executablePath:process.env.CHROME, args:['--no-sandbox','--disable-dev-shm-usage'] });
+            try {
+              const page = await browser.newPage();
+              await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/152 Safari/537.36');
+              const response = await page.goto('https://aliaburas.com/admin/p0-acceptance', { waitUntil:'domcontentloaded', timeout:45000 });
+              if (!response || response.status() !== 200) throw new Error(`P0_PAGE_HTTP:${response?.status() || 0}`);
+              for (let i=0;i<5;i++) {
+                const html = await page.content();
+                if (!/Checking your browser/i.test(html)) break;
+                await new Promise(r=>setTimeout(r,9000));
+              }
+              const html = await page.content();
+              if (!html.includes('P0 Acceptance') && !html.includes('Sign in to Admin first') && !html.includes('data-p0-acceptance')) throw new Error('P0_ACCEPTANCE_ROUTE_NOT_DEPLOYED');
+              const api = await page.evaluate(async () => {
+                const r = await fetch('/api/admin/p0-acceptance-status?assetId=aar_886f61bf6153_ba16f48a');
+                return { status:r.status, text:await r.text() };
+              });
+              if (api.status !== 401) throw new Error(`P0_STATUS_AUTH_CONTRACT:${api.status}`);
+              console.log('P0_ACCEPTANCE_DEPLOYED_OK');
+            } finally { await browser.close(); }
+          })().catch(e=>{ console.error(e); process.exit(1); });
+          NODE
