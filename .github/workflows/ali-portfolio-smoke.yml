@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - name: Verify aliaburas.com with a real browser
+      - name: Verify aliaburas.com P0 gates with a real browser
         shell: bash
         run: |
           set -euo pipefail
@@ -43,12 +43,14 @@ jobs:
             const executablePath = process.env.CHROME;
             const ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const p0 = { step13: false, step14: false, step15: false };
 
-            // Step 13 production proof: inspect the real AWS manifest directly.
             const manifestResponse = await fetch(manifestUrl, { headers: { accept: 'application/json' } });
             if (!manifestResponse.ok) throw new Error(`MANIFEST_HTTP:${manifestResponse.status}`);
             const manifest = await manifestResponse.json();
             const manifestPhotos = (manifest.catalogues || []).flatMap((catalogue) => Array.isArray(catalogue.photographs) ? catalogue.photographs : []);
+            if (!manifestPhotos.length) throw new Error('PUBLIC_MANIFEST_HAS_NO_PHOTOS');
+
             const bilingual = manifestPhotos.find((photo) =>
               Number(photo.metadataVersion) >= 5 &&
               typeof photo.titleEn === 'string' && photo.titleEn.trim() &&
@@ -60,8 +62,16 @@ jobs:
               Array.isArray(photo.keywordsEn) && photo.keywordsEn.length >= 8 &&
               Array.isArray(photo.keywordsAr) && photo.keywordsAr.length >= 8
             );
-            if (!bilingual) throw new Error('STEP13_NO_COMPLETE_BILINGUAL_REAL_PHOTO');
-            console.log(`STEP13_BILINGUAL_PRODUCTION_OK:${bilingual.assetId || bilingual.key}:${bilingual.titleEn}:${bilingual.titleAr}`);
+            if (bilingual) {
+              p0.step13 = true;
+              console.log(`STEP13_BILINGUAL_PRODUCTION_OK:${bilingual.assetId || bilingual.key}:${bilingual.titleEn}:${bilingual.titleAr}`);
+            } else {
+              console.error('STEP13_PENDING:NO_COMPLETE_BILINGUAL_REAL_PHOTO');
+            }
+
+            const publicPhoto = manifestPhotos.find((photo) => typeof photo.assetId === 'string' && photo.assetId.length >= 8);
+            if (!publicPhoto) throw new Error('NO_PUBLIC_ASSET_ID_FOR_PHOTO_DETAIL_TEST');
+            console.log(`P0_TEST_PHOTO:${publicPhoto.assetId}:${publicPhoto.title || ''}`);
 
             const browser = await puppeteer.launch({
               headless: true,
@@ -96,7 +106,6 @@ jobs:
                 if (/Checking your browser before accessing/i.test(html) || /Checking your browser/i.test(title)) throw new Error(`HOSTINGER_CHALLENGE_PERSISTED:${path}`);
                 if (initialStatus < 200 || initialStatus >= 400) throw new Error(`HTTP_STATUS:${path}:${initialStatus}`);
                 console.log(`${path} final title -> ${title}`);
-                console.log(`${path} final url -> ${page.url()}`);
                 console.log(`${path} browser load -> ${elapsed}ms`);
                 for (const marker of markers) if (!html.includes(marker)) throw new Error(`MISSING_MARKER:${path}:${marker}`);
                 return html;
@@ -137,15 +146,33 @@ jobs:
                   curator: { status: curatorResponse.status, revision: curatorResponse.headers.get('x-contest-curator-revision') || '', text: await curatorResponse.text() },
                 };
               });
-
               if (contracts.contact.status !== 200 || !contracts.contact.text.includes('"success":true')) throw new Error(`CONTACT_HONEYPOT_FAILED:${contracts.contact.status}`);
               if (contracts.rating.status !== 401) throw new Error(`STEP14_RATING_AUTH_CONTRACT_FAILED:${contracts.rating.status}`);
               if (contracts.visibility.status !== 401) throw new Error(`STEP14_VISIBILITY_AUTH_CONTRACT_FAILED:${contracts.visibility.status}`);
-              console.log('STEP14_PRODUCTION_ROUTE_CONTRACTS_OK');
+              p0.step14 = true;
+              console.log('STEP14_PRODUCTION_OK');
               if (contracts.curator.status !== 401) throw new Error(`CURATOR_AUTH_CONTRACT_FAILED:${contracts.curator.status}`);
               if (contracts.curator.revision !== '2026-08-24-multi-ai-v1') throw new Error(`CURATOR_REVISION_MISMATCH:${contracts.curator.revision}`);
 
-              console.log('ALI_PORTFOLIO_PRODUCTION_OK');
+              const photoPath = `/photo/${encodeURIComponent(publicPhoto.assetId)}`;
+              const photoHtml = await open(photoPath, ['data-photo-detail-performance="v5-framed-room"', 'data-framed-room-preview="v1"', 'See it framed']);
+              if (!photoHtml.includes('Oak') || !photoHtml.includes('Black') || !photoHtml.includes('White')) throw new Error('STEP15_FRAME_OPTIONS_MISSING');
+              const roomResponse = await page.goto(`${base}/rooms/v1-gallery-oak-landscape.svg`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              if (!roomResponse || roomResponse.status() !== 200) throw new Error(`STEP15_ROOM_ASSET_HTTP:${roomResponse?.status() || 0}`);
+              const roomText = await roomResponse.text();
+              if (!roomText.includes('<svg')) throw new Error('STEP15_ROOM_ASSET_NOT_SVG');
+
+              await page.setViewport({ width: 390, height: 844, isMobile: true });
+              await open(photoPath, ['data-framed-room-preview="v1"']);
+              const mobile = await page.evaluate(() => ({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth }));
+              if (mobile.scrollWidth > mobile.width + 2) throw new Error(`STEP15_MOBILE_HORIZONTAL_OVERFLOW:${mobile.scrollWidth}>${mobile.width}`);
+              p0.step15 = true;
+              console.log('STEP15_PRODUCTION_OK');
+
+              console.log(`P0_SUMMARY:${JSON.stringify(p0)}`);
+              if (!p0.step13) throw new Error('P0_INCOMPLETE:STEP13_REQUIRES_ONE_PERSISTED_BILINGUAL_REAL_PHOTO');
+              if (!p0.step14 || !p0.step15) throw new Error('P0_INCOMPLETE:STEP14_OR_STEP15');
+              console.log('ALI_PORTFOLIO_P0_100_PERCENT_OK');
             } finally {
               await browser.close();
             }
