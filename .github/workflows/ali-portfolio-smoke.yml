@@ -13,7 +13,7 @@ permissions:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - name: Verify aliaburas.com with a real browser
         shell: bash
@@ -56,8 +56,10 @@ jobs:
 
               async function open(path, markers = []) {
                 const url = `${base}${path}`;
+                const started = Date.now();
                 const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-                console.log(`${path} initial -> ${response?.status() ?? 'no-response'}`);
+                const initialStatus = response?.status() ?? 0;
+                console.log(`${path} initial -> ${initialStatus}`);
 
                 for (let attempt = 1; attempt <= 5; attempt++) {
                   const html = await page.content();
@@ -70,25 +72,87 @@ jobs:
 
                 const html = await page.content();
                 const title = await page.title();
+                const elapsed = Date.now() - started;
+
                 if (/Checking your browser before accessing/i.test(html) || /Checking your browser/i.test(title)) {
                   throw new Error(`HOSTINGER_CHALLENGE_PERSISTED:${path}`);
                 }
 
+                if (initialStatus < 200 || initialStatus >= 400) {
+                  throw new Error(`HTTP_STATUS:${path}:${initialStatus}`);
+                }
+
                 console.log(`${path} final title -> ${title}`);
                 console.log(`${path} final url -> ${page.url()}`);
+                console.log(`${path} browser load -> ${elapsed}ms`);
 
                 for (const marker of markers) {
                   if (!html.includes(marker)) {
                     throw new Error(`MISSING_MARKER:${path}:${marker}`);
                   }
                 }
+
+                return html;
               }
 
-              await open('/', ['Ali Abu Ras', 'عربي', 'I seek the soul of a place']);
-              await open('/selected-works', ['data-selected-works-performance="v2"', 'Selected']);
-              await open('/competitions-awards', ['Competitions', 'Awards', 'عربي']);
-              await open('/robots.txt', ['Disallow: /admin']);
-              await open('/sitemap.xml', ['/selected-works']);
+              const home = await open('/', ['Ali Abu Ras', 'عربي', 'I seek the soul of a place']);
+              await open('/about', ['Ali Abu Ras']);
+              await open('/contact');
+              await open('/licensing');
+              const awards = await open('/competitions-awards', ['Competitions', 'Awards', 'عربي']);
+              const selectedWorks = await open('/selected-works', ['data-selected-works-performance="v2"', 'Selected']);
+              const lifestyle = await open('/collections/lifestyle');
+              const admin = await open('/admin');
+              await open('/admin/recover');
+              const robots = await open('/robots.txt', ['Disallow: /admin']);
+              const sitemap = await open('/sitemap.xml', ['/selected-works']);
+
+              if (!/noindex/i.test(admin)) throw new Error('ADMIN_NOINDEX_MISSING');
+              if (!/Disallow:\s*\/admin/i.test(robots)) throw new Error('ROBOTS_ADMIN_BLOCK_MISSING');
+
+              for (const path of ['/about', '/contact', '/competitions-awards', '/selected-works', '/collections/lifestyle']) {
+                if (!sitemap.includes(path)) throw new Error(`SITEMAP_MISSING:${path}`);
+              }
+
+              if (!home.includes('Awards')) throw new Error('HOME_AWARDS_MARKER_MISSING');
+              if (!awards.includes('Competitions') || !awards.includes('Awards')) throw new Error('AWARDS_PAGE_MARKER_MISSING');
+              if (!selectedWorks.includes('data-selected-works-performance="v2"')) throw new Error('SELECTED_WORKS_V2_MISSING');
+              if (!/Lifestyle/i.test(lifestyle)) throw new Error('LIFESTYLE_PAGE_MARKER_MISSING');
+
+              // Exercise the contact anti-spam honeypot without sending email.
+              await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 45000 });
+              const contact = await page.evaluate(async () => {
+                const response = await fetch('/api/contact', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ website: 'portfolio-smoke-bot' }),
+                });
+                const text = await response.text();
+                return { status: response.status, text };
+              });
+              console.log(`/api/contact honeypot -> ${contact.status}`);
+              if (contact.status !== 200 || !contact.text.includes('"success":true')) {
+                throw new Error(`CONTACT_HONEYPOT_FAILED:${contact.status}:${contact.text}`);
+              }
+
+              // Confirm the deployed Contest Curator server revision without an admin token or AI call.
+              const curator = await page.evaluate(async () => {
+                const response = await fetch('/api/admin/contest-curator', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: '{}',
+                });
+                return {
+                  status: response.status,
+                  revision: response.headers.get('x-contest-curator-revision') || '',
+                  text: await response.text(),
+                };
+              });
+              console.log(`/api/admin/contest-curator unauthenticated -> ${curator.status} | revision ${curator.revision}`);
+              if (curator.status !== 401) throw new Error(`CURATOR_AUTH_CONTRACT_FAILED:${curator.status}`);
+              if (curator.revision !== '2026-08-24-multi-ai-v1') {
+                throw new Error(`CURATOR_REVISION_MISMATCH:${curator.revision}`);
+              }
 
               console.log('ALI_PORTFOLIO_PRODUCTION_OK');
             } finally {
