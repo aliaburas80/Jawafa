@@ -1,0 +1,67 @@
+name: Ali Portfolio Smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify aliaburas.com production
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          check() {
+            local path="$1"
+            local out="$2"
+            local headers="${out}.headers"
+            local url="https://aliaburas.com${path}"
+            local code
+
+            code=$(curl --compressed --silent --show-error --location --retry 2 --retry-delay 2 --max-time 30 \
+              --user-agent 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36' \
+              --dump-header "$headers" \
+              --output "$out" \
+              --write-out '%{http_code}' \
+              "$url")
+
+            echo "$url -> $code"
+
+            if [ "$code" -eq 403 ] \
+              && tr -d '\r' < "$headers" | grep -Eqi '^server:[[:space:]]*hcdn[[:space:]]*$' \
+              && grep -qi 'Checking your browser before accessing' "$out"; then
+              echo "HOSTINGER_CHALLENGE:$path"
+              exit 2
+            fi
+
+            if [ "$code" -lt 200 ] || [ "$code" -ge 400 ]; then
+              echo "HTTP_ERROR:$path:$code"
+              exit 1
+            fi
+          }
+
+          check / home.html
+          check /selected-works selected-works.html
+          check /competitions-awards competitions-awards.html
+          check /robots.txt robots.txt
+          check /sitemap.xml sitemap.xml
+
+          grep -q 'Ali Abu Ras' home.html
+          grep -q 'عربي' home.html
+          grep -q 'I seek the soul of a place' home.html
+          grep -q 'data-selected-works-performance="v2"' selected-works.html
+          grep -q 'Selected' selected-works.html
+          grep -q 'Competitions' competitions-awards.html
+          grep -q 'Awards' competitions-awards.html
+          grep -q 'عربي' competitions-awards.html
+          grep -Eqi 'Disallow:[[:space:]]*/admin' robots.txt
+          grep -q '/selected-works' sitemap.xml
+
+          echo 'ALI_PORTFOLIO_PRODUCTION_OK'
