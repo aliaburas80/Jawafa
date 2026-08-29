@@ -13,7 +13,7 @@ permissions:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - name: Verify aliaburas.com with a real browser
         shell: bash
@@ -39,9 +39,29 @@ jobs:
 
           (async () => {
             const base = 'https://aliaburas.com';
+            const manifestUrl = 'https://3fokronhfvlz4lducax6zc3j2i0jiqvv.lambda-url.us-east-1.on.aws/';
             const executablePath = process.env.CHROME;
             const ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            // Step 13 production proof: inspect the real AWS manifest directly.
+            const manifestResponse = await fetch(manifestUrl, { headers: { accept: 'application/json' } });
+            if (!manifestResponse.ok) throw new Error(`MANIFEST_HTTP:${manifestResponse.status}`);
+            const manifest = await manifestResponse.json();
+            const manifestPhotos = (manifest.catalogues || []).flatMap((catalogue) => Array.isArray(catalogue.photographs) ? catalogue.photographs : []);
+            const bilingual = manifestPhotos.find((photo) =>
+              Number(photo.metadataVersion) >= 5 &&
+              typeof photo.titleEn === 'string' && photo.titleEn.trim() &&
+              typeof photo.captionEn === 'string' && photo.captionEn.trim() &&
+              typeof photo.altEn === 'string' && photo.altEn.trim() &&
+              typeof photo.titleAr === 'string' && /[\u0600-\u06FF]/.test(photo.titleAr) &&
+              typeof photo.captionAr === 'string' && /[\u0600-\u06FF]/.test(photo.captionAr) &&
+              typeof photo.altAr === 'string' && /[\u0600-\u06FF]/.test(photo.altAr) &&
+              Array.isArray(photo.keywordsEn) && photo.keywordsEn.length >= 8 &&
+              Array.isArray(photo.keywordsAr) && photo.keywordsAr.length >= 8
+            );
+            if (!bilingual) throw new Error('STEP13_NO_COMPLETE_BILINGUAL_REAL_PHOTO');
+            console.log(`STEP13_BILINGUAL_PRODUCTION_OK:${bilingual.assetId || bilingual.key}:${bilingual.titleEn}:${bilingual.titleAr}`);
 
             const browser = await puppeteer.launch({
               headless: true,
@@ -73,25 +93,12 @@ jobs:
                 const html = await page.content();
                 const title = await page.title();
                 const elapsed = Date.now() - started;
-
-                if (/Checking your browser before accessing/i.test(html) || /Checking your browser/i.test(title)) {
-                  throw new Error(`HOSTINGER_CHALLENGE_PERSISTED:${path}`);
-                }
-
-                if (initialStatus < 200 || initialStatus >= 400) {
-                  throw new Error(`HTTP_STATUS:${path}:${initialStatus}`);
-                }
-
+                if (/Checking your browser before accessing/i.test(html) || /Checking your browser/i.test(title)) throw new Error(`HOSTINGER_CHALLENGE_PERSISTED:${path}`);
+                if (initialStatus < 200 || initialStatus >= 400) throw new Error(`HTTP_STATUS:${path}:${initialStatus}`);
                 console.log(`${path} final title -> ${title}`);
                 console.log(`${path} final url -> ${page.url()}`);
                 console.log(`${path} browser load -> ${elapsed}ms`);
-
-                for (const marker of markers) {
-                  if (!html.includes(marker)) {
-                    throw new Error(`MISSING_MARKER:${path}:${marker}`);
-                  }
-                }
-
+                for (const marker of markers) if (!html.includes(marker)) throw new Error(`MISSING_MARKER:${path}:${marker}`);
                 return html;
               }
 
@@ -103,63 +110,44 @@ jobs:
               const selectedWorks = await open('/selected-works', ['data-selected-works-performance="v2"', 'Selected']);
               const lifestyle = await open('/collections/lifestyle');
               const admin = await open('/admin');
+              const visibilityAdmin = await open('/admin/visibility');
               await open('/admin/recover');
               const robots = await open('/robots.txt', ['Disallow: /admin']);
               const sitemap = await open('/sitemap.xml', ['/selected-works']);
 
               if (!/noindex/i.test(admin)) throw new Error('ADMIN_NOINDEX_MISSING');
               if (!/Disallow:\s*\/admin/i.test(robots)) throw new Error('ROBOTS_ADMIN_BLOCK_MISSING');
-
-              for (const path of ['/about', '/contact', '/competitions-awards', '/selected-works', '/collections/lifestyle']) {
-                if (!sitemap.includes(path)) throw new Error(`SITEMAP_MISSING:${path}`);
-              }
-
+              for (const path of ['/about', '/contact', '/competitions-awards', '/selected-works', '/collections/lifestyle']) if (!sitemap.includes(path)) throw new Error(`SITEMAP_MISSING:${path}`);
               if (!home.includes('Awards')) throw new Error('HOME_AWARDS_MARKER_MISSING');
               if (!awards.includes('Competitions') || !awards.includes('Awards')) throw new Error('AWARDS_PAGE_MARKER_MISSING');
               if (!selectedWorks.includes('data-selected-works-performance="v2"')) throw new Error('SELECTED_WORKS_V2_MISSING');
               if (!/Lifestyle/i.test(lifestyle)) throw new Error('LIFESTYLE_PAGE_MARKER_MISSING');
+              if (!/Visibility|Administrator sign-in|required/i.test(visibilityAdmin)) throw new Error('STEP14_VISIBILITY_ROUTE_NOT_DEPLOYED');
 
-              // Exercise the contact anti-spam honeypot without sending email.
               await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 45000 });
-              const contact = await page.evaluate(async () => {
-                const response = await fetch('/api/contact', {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ website: 'portfolio-smoke-bot' }),
-                });
-                const text = await response.text();
-                return { status: response.status, text };
-              });
-              console.log(`/api/contact honeypot -> ${contact.status}`);
-              if (contact.status !== 200 || !contact.text.includes('"success":true')) {
-                throw new Error(`CONTACT_HONEYPOT_FAILED:${contact.status}:${contact.text}`);
-              }
-
-              // Confirm the deployed Contest Curator server revision without an admin token or AI call.
-              const curator = await page.evaluate(async () => {
-                const response = await fetch('/api/admin/contest-curator', {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: '{}',
-                });
+              const contracts = await page.evaluate(async () => {
+                const contactResponse = await fetch('/api/contact', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ website: 'portfolio-smoke-bot' }) });
+                const ratingResponse = await fetch('/api/admin/photo-rating', { method: 'GET' });
+                const visibilityResponse = await fetch('/api/admin/photo-visibility', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+                const curatorResponse = await fetch('/api/admin/contest-curator', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
                 return {
-                  status: response.status,
-                  revision: response.headers.get('x-contest-curator-revision') || '',
-                  text: await response.text(),
+                  contact: { status: contactResponse.status, text: await contactResponse.text() },
+                  rating: { status: ratingResponse.status, text: await ratingResponse.text() },
+                  visibility: { status: visibilityResponse.status, text: await visibilityResponse.text() },
+                  curator: { status: curatorResponse.status, revision: curatorResponse.headers.get('x-contest-curator-revision') || '', text: await curatorResponse.text() },
                 };
               });
-              console.log(`/api/admin/contest-curator unauthenticated -> ${curator.status} | revision ${curator.revision}`);
-              if (curator.status !== 401) throw new Error(`CURATOR_AUTH_CONTRACT_FAILED:${curator.status}`);
-              if (curator.revision !== '2026-08-24-multi-ai-v1') {
-                throw new Error(`CURATOR_REVISION_MISMATCH:${curator.revision}`);
-              }
+
+              if (contracts.contact.status !== 200 || !contracts.contact.text.includes('"success":true')) throw new Error(`CONTACT_HONEYPOT_FAILED:${contracts.contact.status}`);
+              if (contracts.rating.status !== 401) throw new Error(`STEP14_RATING_AUTH_CONTRACT_FAILED:${contracts.rating.status}`);
+              if (contracts.visibility.status !== 401) throw new Error(`STEP14_VISIBILITY_AUTH_CONTRACT_FAILED:${contracts.visibility.status}`);
+              console.log('STEP14_PRODUCTION_ROUTE_CONTRACTS_OK');
+              if (contracts.curator.status !== 401) throw new Error(`CURATOR_AUTH_CONTRACT_FAILED:${contracts.curator.status}`);
+              if (contracts.curator.revision !== '2026-08-24-multi-ai-v1') throw new Error(`CURATOR_REVISION_MISMATCH:${contracts.curator.revision}`);
 
               console.log('ALI_PORTFOLIO_PRODUCTION_OK');
             } finally {
               await browser.close();
             }
-          })().catch((error) => {
-            console.error(error);
-            process.exit(1);
-          });
+          })().catch((error) => { console.error(error); process.exit(1); });
           NODE
